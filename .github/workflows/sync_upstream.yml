@@ -1,0 +1,45 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # 每天 UTC 4:00 (北京时间 12:00) 自动同步
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync from upstream OpenListTeam/OpenList
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/OpenListTeam/OpenList.git
+          git fetch upstream
+
+      - name: Merge upstream/main
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git merge upstream/main --no-edit
+
+      - name: Push changes
+        run: |
+          git push origin main
+
+      - name: Notify on conflict
+        if: failure()
+        run: |
+          echo "::warning::Merge conflict detected. Manual resolution required."
+          echo "Please resolve conflicts manually:"
+          echo "1. git fetch upstream"
+          echo "2. git merge upstream/main"
+          echo "3. Resolve conflicts"
+          echo "4. git push origin main"
