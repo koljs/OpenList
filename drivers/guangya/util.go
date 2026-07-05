@@ -155,10 +155,11 @@ func (d *GuangYa) doRefreshToken() error {
 		"Accept":          "application/json",
 	})
 
-	req.SetBody(RefreshTokenReq{
-		ClientId:     clientId,
-		GrantType:    "refresh_token",
-		RefreshToken: d.RefreshToken,
+	req.SetBody(map[string]interface{}{
+		"client_id":     clientId,
+		"grant_type":    "refresh_token",
+		"refresh_token": d.RefreshToken,
+		"device_id":     d.DeviceId,
 	})
 
 	var tokenResp TokenResp
@@ -170,16 +171,18 @@ func (d *GuangYa) doRefreshToken() error {
 	}
 
 	if !resp.IsSuccess() {
-		return errors.New("Token refresh failed: " + resp.Status())
+		body := string(resp.Body())
+		return errors.New("Token refresh failed: " + resp.Status() + " - " + body)
 	}
 
 	// 更新 Token 状态
 	d.tokenMu.token = tokenResp.AccessToken
 	d.tokenMu.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
-	// 如果返回了新的 RefreshToken，更新它
+	// 如果返回了新的 RefreshToken，更新它（同时更新内存中的 tokenMu）
 	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != d.RefreshToken {
 		d.RefreshToken = tokenResp.RefreshToken
+		d.tokenMu.refreshToken = tokenResp.RefreshToken
 	}
 
 	return nil
