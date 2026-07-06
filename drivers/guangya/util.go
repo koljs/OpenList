@@ -172,6 +172,10 @@ func (d *GuangYa) doRefreshToken() error {
 
 	if !resp.IsSuccess() {
 		body := string(resp.Body())
+		// 检测 refresh_token 失效，给出明确提示
+		if strings.Contains(body, "invalid_grant") {
+			return errors.New("RefreshToken 已失效，请重新抓包获取新的 RefreshToken 并更新存储配置。详情: " + body)
+		}
 		return errors.New("Token refresh failed: " + resp.Status() + " - " + body)
 	}
 
