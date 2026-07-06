@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: "0 4 * * *" # 每天 UTC 4:00 (北京时间 12:00) 自动同步
   workflow_dispatch:
+  workflows: write
 
 permissions:
   contents: write
