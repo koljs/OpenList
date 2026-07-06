@@ -7,8 +7,7 @@ on:
 
 permissions:
   contents: write
-  workflows: write
-  
+
 jobs:
   sync:
     name: Sync from upstream OpenListTeam/OpenList
@@ -19,6 +18,9 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
+          # 使用 PAT 以便推送包含工作流文件改动的合并提交
+          # GITHUB_TOKEN 无权推送工作流文件，必须用 PAT
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Add upstream remote
         run: |
