@@ -15,13 +15,16 @@ concurrency:
 
 env:
   DOCKERHUB_ORG_NAME: ${{ vars.DOCKERHUB_ORG_NAME || 'openlistteam' }}
-  GHCR_ORG_NAME: ${{ vars.GHCR_ORG_NAME || 'openlistteam' }}
+  # GHCR 命名空间默认使用当前仓库 owner，避免 fork 推送到上游组织命名空间被拒
+  GHCR_ORG_NAME: ${{ vars.GHCR_ORG_NAME || github.repository_owner }}
   IMAGE_NAME: openlist-git
   IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
   RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/ppc64le,linux/riscv64,linux/loong64' ### Temporarily disable Docker builds for linux/s390x architectures for unknown reasons.
   IMAGE_PUSH: ${{ github.event_name == 'push' }}
+  # 是否启用 DockerHub 推送：仅在配置了 DOCKERHUB_TOKEN 时启用
+  DOCKERHUB_PUSH: ${{ github.event_name == 'push' && secrets.DOCKERHUB_TOKEN != '' }}
   IMAGE_TAGS_BETA: |
     type=ref,event=pr
     type=raw,value=beta,enable={{is_default_branch}}
@@ -118,7 +121,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to DockerHub Container Registry
-        if: env.IMAGE_PUSH == 'true'
+        if: env.DOCKERHUB_PUSH == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_ORG_NAME_BACKUP || env.DOCKERHUB_ORG_NAME }}
@@ -130,7 +133,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
-            ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
+            ${{ env.DOCKERHUB_PUSH == 'true' && format('{0}/{1}', env.DOCKERHUB_ORG_NAME, env.IMAGE_NAME_DOCKERHUB) || '' }}
           tags: ${{ env.IMAGE_TAGS_BETA }}
           flavor: |
             ${{ matrix.tag_favor }}

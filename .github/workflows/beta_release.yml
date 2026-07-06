@@ -22,6 +22,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Record previous beta ref
+        id: prev-beta
+        run: |
+          # 记录上一个 beta tag 指向的 commit，作为 changelog 的起点
+          git fetch --tags --force
+          PREV_BETA=""
+          if git rev-parse beta >/dev/null 2>&1; then
+            PREV_BETA=$(git rev-parse beta)
+          fi
+          echo "prev_beta=$PREV_BETA" >> "$GITHUB_OUTPUT"
+          echo "Previous beta ref: ${PREV_BETA:-<none>}"
+
       - name: Create or update ref
         id: create-or-update-ref
         uses: ovsds/create-or-update-ref-action@v1
@@ -35,9 +47,19 @@ jobs:
 
       - name: changelog # or changelogithub@0.12 if ensure the stable result
         id: changelog
+        env:
+          PREV_BETA: ${{ steps.prev-beta.outputs.prev_beta }}
         run: |
           git tag -l
-          npx changelogithub --output CHANGELOG.md
+          # 限定 changelog 范围：从上一个 beta tag 到当前 HEAD
+          # 避免孤儿提交场景下把全部历史纳入导致 release notes 超过 125000 字符上限
+          if [ -n "$PREV_BETA" ]; then
+            FROM_REF="--from $PREV_BETA"
+          else
+            # 首次运行无旧 beta tag：以 HEAD~1 为起点，仅记录最新提交
+            FROM_REF="--from $(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          npx changelogithub $FROM_REF --output CHANGELOG.md
 
       - name: Upload assets to beta release
         env:
