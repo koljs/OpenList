@@ -209,12 +209,17 @@ func (d *GuangYa) apiRequest(method, path string, callback base.ReqCallback, out
 	return d.request(method, apiBaseUrl, path, callback, out)
 }
 
-// Account 请求 (account.guangyapan.com) - 不带自动刷新
+// Account 请求 (account.guangyapan.com) - 使用 token manager 中的最新 token
 func (d *GuangYa) accountRequestNoRefresh(method, path string, callback base.ReqCallback, out interface{}) error {
 	u := accountBaseUrl + path
 	req := base.RestyClient.R()
 
 	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	// 从 token manager 获取最新的 access_token，而非配置中的旧值
+	d.tokenMu.mu.Lock()
+	currentToken := d.tokenMu.token
+	d.tokenMu.mu.Unlock()
 
 	req.SetHeaders(map[string]string{
 		"X-Device-Id":     d.DeviceId,
@@ -222,7 +227,7 @@ func (d *GuangYa) accountRequestNoRefresh(method, path string, callback base.Req
 		"Accept-Language": "zh-CN",
 		"Content-Type":    "application/json",
 		"Accept":          "application/json",
-		"Authorization":   "Bearer " + d.Token,
+		"Authorization":   "Bearer " + currentToken,
 		"ts":              ts,
 	})
 
