@@ -24,15 +24,27 @@ jobs:
           ssh-keyscan gitee.com >> ~/.ssh/known_hosts
 
       - name: Create single commit and push
+        env:
+          GITEE_REPO_URL: ${{ vars.GITEE_REPO_URL }}
+          GITEE_SSH_PRIVATE_KEY: ${{ secrets.GITEE_SSH_PRIVATE_KEY }}
         run: |
+          # 未配置 Gitee 凭据时优雅跳过，避免崩溃
+          if [ -z "$GITEE_REPO_URL" ] || [ -z "$GITEE_SSH_PRIVATE_KEY" ]; then
+            echo "::warning::GITEE_REPO_URL 或 GITEE_SSH_PRIVATE_KEY 未配置，跳过 Gitee 同步。"
+            echo "请在仓库 Settings → Secrets and variables → Actions 中配置："
+            echo "  - Secret: GITEE_SSH_PRIVATE_KEY (Gitee SSH 私钥)"
+            echo "  - Variable: GITEE_REPO_URL (如 git@gitee.com:koljs/OpenList.git)"
+            exit 0
+          fi
+
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          
+
           # Create a new branch
           git checkout --orphan new-main
           git add .
           git commit -m "Sync from GitHub: $(date)"
 
           # Add Gitee remote and force push
-          git remote add gitee ${{ vars.GITEE_REPO_URL }}
+          git remote add gitee "$GITEE_REPO_URL"
           git push --force gitee new-main:main

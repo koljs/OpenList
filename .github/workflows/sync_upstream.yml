@@ -1,0 +1,74 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # 每天 UTC 4:00 (北京时间 12:00) 自动同步
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync from upstream OpenListTeam/OpenList
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          # 使用 PAT 以便推送包含工作流文件改动的合并提交
+          # GITHUB_TOKEN 无权推送工作流文件，必须用 PAT
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/OpenListTeam/OpenList.git
+          git fetch upstream
+
+      - name: Merge upstream/main
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          # 尝试合并，如果冲突则自动解决
+          if ! git merge upstream/main --no-edit; then
+            echo "::warning::Merge conflicts detected, auto-resolving..."
+
+            # 获取所有冲突文件列表
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            echo "Conflicting files:"
+            echo "$CONFLICTS"
+
+            # 对 .github/workflows/ 下的冲突文件保留 fork 版本（ours），
+            # 因为 fork 有自定义的 CI 修改（DockerHub 条件跳过、GHCR 命名空间等）
+            # 对其他冲突文件采用上游版本（theirs）
+            for file in $CONFLICTS; do
+              if [[ "$file" == .github/workflows/* ]]; then
+                echo "  $file: keeping fork version (ours)"
+                git checkout --ours "$file"
+              else
+                echo "  $file: using upstream version (theirs)"
+                git checkout --theirs "$file"
+              fi
+              git add "$file"
+            done
+
+            # 完成合并提交
+            git commit --no-edit
+            echo "Conflicts auto-resolved."
+          fi
+
+      - name: Push changes
+        run: |
+          git push origin main
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::warning::Sync upstream failed. Manual resolution may be required."
+          echo "Steps to resolve:"
+          echo "1. git fetch upstream"
+          echo "2. git merge upstream/main"
+          echo "3. Resolve conflicts"
+          echo "4. git push origin main"
