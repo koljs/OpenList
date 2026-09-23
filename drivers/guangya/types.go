@@ -1,7 +1,6 @@
 package guangya
 
 import (
-	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -13,32 +12,36 @@ type Resp struct {
 	Data interface{} `json:"data"`
 }
 
-// Token 刷新响应
+// Token 刷新响应 (设备码轮询也复用此结构)
 type TokenResp struct {
-	TokenType    string `json:"token_type"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	Scope        string `json:"scope"`
-	Sub          string `json:"sub"`
+	TokenType        string `json:"token_type"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresIn        int    `json:"expires_in"`
+	Scope            string `json:"scope"`
+	Sub              string `json:"sub"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
 }
 
-// Token 刷新请求
-type RefreshTokenReq struct {
-	ClientId     string `json:"client_id"`
-	GrantType    string `json:"grant_type"`
-	RefreshToken string `json:"refresh_token"`
+// 设备码授权响应 (POST /v1/auth/device/code)
+type DeviceCodeResp struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURL         string `json:"verification_url"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int    `json:"expires_in"` // 二维码有效期(秒), 实测 120
+	Interval                int    `json:"interval"`   // 建议轮询间隔(秒), 实测 2
 }
 
-// 文件列表请求
+// 文件列表请求 (Web 端协议)
 type FileListReq struct {
-	SortType int    `json:"sortType"`
-	ResType  int    `json:"resType"`
-	OrderBy  int    `json:"orderBy"`
-	PageSize int    `json:"pageSize"`
-	Page     int    `json:"page"`
-	DirType  int    `json:"dirType"`
-	ParentId string `json:"parentId"`
+	ParentId  string `json:"parentId"`
+	Page      int    `json:"page"`
+	PageSize  int    `json:"pageSize"`
+	OrderBy   int    `json:"orderBy"`
+	SortType  int    `json:"sortType"`
+	FileTypes []int  `json:"fileTypes"`
 }
 
 // 文件列表响应
@@ -81,11 +84,6 @@ type DownloadResp struct {
 	RequestId        string `json:"requestId"`
 }
 
-// 资产信息请求
-type AssetsReq struct {
-	NeedTrafficData bool `json:"needTrafficData"`
-}
-
 // 资产信息响应
 type AssetsResp struct {
 	TotalSpaceSize int64 `json:"totalSpaceSize"`
@@ -103,16 +101,6 @@ type UserInfo struct {
 	Name        string `json:"name"`
 	PhoneNumber string `json:"phone_number"`
 	CreatedAt   string `json:"created_at"`
-}
-
-// Token 状态管理
-type TokenState struct {
-	mu            sync.Mutex
-	token         string
-	refreshToken  string
-	expiresAt     time.Time
-	lastRefresh   time.Time
-	refreshNeeded bool
 }
 
 // 新建文件夹请求

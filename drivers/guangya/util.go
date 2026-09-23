@@ -1,25 +1,31 @@
 package guangya
 
 import (
+	"crypto/rand"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
+	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/go-resty/resty/v2"
 	jsoniter "github.com/json-iterator/go"
+	"github.com/skip2/go-qrcode"
 )
 
 const (
 	apiBaseUrl     = "https://api.guangyapan.com"
 	accountBaseUrl = "https://account.guangyapan.com"
-	clientId       = "aMe_eFSlkrbQXpUV"
+	// Web 端 client_id (与安卓端 aMe_eFSlkrbQXpUV 不同, Web 端允许本地生成设备ID)
+	clientId = "aMe-8VSlkrbQXpUR"
+	webUA    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
 
 // Token 状态管理
@@ -30,7 +36,43 @@ type tokenManager struct {
 	expiresAt    time.Time
 }
 
-// 请求封装（带自动刷新）
+// generateDeviceId 本地生成 32 位 hex 设备ID (与官方 Web 端行为一致, 授权后即为独立设备)
+func generateDeviceId() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// fallback: 时间戳
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+// commonHeaders Web 端公共请求头
+func commonHeaders() map[string]string {
+	return map[string]string{
+		"Accept":             "application/json, text/plain, */*",
+		"Content-Type":       "application/json",
+		"Referer":            "https://www.guangyupan.com/",
+		"User-Agent":         webUA,
+		"Accept-Language":    "zh-CN",
+		"X-Client-Id":        clientId,
+		"X-Client-Version":   "0.0.1",
+		"X-Device-Model":     "chrome%2F147.0.0.0",
+		"X-Device-Name":      "PC-Chrome",
+		"X-Net-Work-Type":    "NONE",
+		"X-Os-Version":       "Win32",
+		"X-Platform-Version": "1",
+		"X-Protocol-Version": "301",
+		"X-Provider-Name":    "NONE",
+		"X-Sdk-Version":      "9.0.2",
+	}
+}
+
+// deviceSign 生成 Web 端设备签名 (固定填充, 与官方 Web 客户端行为一致)
+func deviceSign(deviceId string) string {
+	return "wdi10." + deviceId + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}
+
+// 请求封装 (带自动刷新)
 func (d *GuangYa) request(method, baseUrl, path string, callback base.ReqCallback, out interface{}) error {
 	// 确保 Token 有效
 	if err := d.ensureValidToken(); err != nil {
@@ -40,41 +82,21 @@ func (d *GuangYa) request(method, baseUrl, path string, callback base.ReqCallbac
 	u := baseUrl + path
 	req := base.RestyClient.R()
 
-	// 生成时间戳
-	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
-
-	// 获取当前 Token
 	d.tokenMu.mu.Lock()
 	token := d.tokenMu.token
 	d.tokenMu.mu.Unlock()
 
-	// 设置完整的请求头（模拟安卓客户端）
-	req.SetHeaders(map[string]string{
-		"app":             "com.guangshanyun.pan",
-		"peerId":          "676777E27FF1B36V",
-		"bd":              "Xiaomi",
-		"os":              "34",
-		"ch":              "10003",
-		"X-Device-Id":     d.DeviceId,
-		"nt":              "1",
-		"sign":            "",
-		"User-Agent":      d.getUserAgent(),
-		"vc":              "1040",
-		"client_id":       clientId,
-		"dt":              "1",
-		"Authorization":   "Bearer " + token,
-		"X-Captcha-Token": "",
-		"x-client-id":     clientId,
-		"av":              "1.1.0",
-		"vpn":             "0",
-		"md":              "Xiaomi M2102K1AC mars Xiaomi",
-		"guid":            d.DeviceId,
-		"Accept-Language": "zh-CN",
-		"did":             d.DeviceId,
-		"ts":              ts,
-		"Content-Type":    "application/json",
-		"Accept":          "application/json",
-	})
+	// Web 端公共头 + 设备头 + 认证头
+	headers := commonHeaders()
+	headers["X-Device-Id"] = d.DeviceId
+	headers["X-Device-Sign"] = deviceSign(d.DeviceId)
+	headers["Authorization"] = "Bearer " + token
+	headers["Did"] = d.DeviceId
+	headers["Dt"] = "4"
+	headers["did"] = d.DeviceId
+	headers["dt"] = "4"
+	headers["accessToken"] = token
+	req.SetHeaders(headers)
 
 	var r Resp
 	req.SetResult(&r)
@@ -144,37 +166,30 @@ func (d *GuangYa) doRefreshToken() error {
 		return errors.New("RefreshToken not configured")
 	}
 
-	u := accountBaseUrl + "/v1/auth/token?client_id=" + clientId
 	req := base.RestyClient.R()
-
-	req.SetHeaders(map[string]string{
-		"X-Device-Id":     d.DeviceId,
-		"User-Agent":      d.getUserAgent(),
-		"Accept-Language": "zh-CN",
-		"Content-Type":    "application/json",
-		"Accept":          "application/json",
-	})
+	req.SetHeaders(commonHeaders())
+	req.SetHeader("X-Device-Id", d.DeviceId)
+	req.SetHeader("X-Device-Sign", deviceSign(d.DeviceId))
 
 	req.SetBody(map[string]interface{}{
-		"client_id":     clientId,
 		"grant_type":    "refresh_token",
 		"refresh_token": d.RefreshToken,
-		"device_id":     d.DeviceId,
+		"client_id":     clientId,
 	})
 
 	var tokenResp TokenResp
 	req.SetResult(&tokenResp)
 
-	resp, err := req.Post(u)
+	resp, err := req.Post(accountBaseUrl + "/v1/auth/token")
 	if err != nil {
 		return err
 	}
 
-	if !resp.IsSuccess() {
+	if !resp.IsSuccess() || tokenResp.AccessToken == "" {
 		body := string(resp.Body())
 		// 检测 refresh_token 失效，给出明确提示
-		if strings.Contains(body, "invalid_grant") {
-			return errors.New("RefreshToken 已失效，请重新抓包获取新的 RefreshToken 并更新存储配置。详情: " + body)
+		if strings.Contains(body, "invalid_grant") || tokenResp.Error == "invalid_grant" {
+			return errors.New("RefreshToken 已失效, 请编辑存储并重新扫码授权获取新的 RefreshToken。详情: " + body)
 		}
 		return errors.New("Token refresh failed: " + resp.Status() + " - " + body)
 	}
@@ -183,26 +198,151 @@ func (d *GuangYa) doRefreshToken() error {
 	d.tokenMu.token = tokenResp.AccessToken
 	d.tokenMu.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
-	// 如果返回了新的 RefreshToken，更新它（同时更新内存中的 tokenMu）
+	// 如果返回了新的 RefreshToken (轮换机制), 更新并持久化到存储配置
+	tokenChanged := false
 	if tokenResp.RefreshToken != "" && tokenResp.RefreshToken != d.RefreshToken {
 		d.RefreshToken = tokenResp.RefreshToken
 		d.tokenMu.refreshToken = tokenResp.RefreshToken
+		tokenChanged = true
+	}
+	if d.Token != tokenResp.AccessToken {
+		d.Token = tokenResp.AccessToken
+		tokenChanged = true
+	}
+	if tokenChanged {
+		op.MustSaveDriverStorage(d)
 	}
 
 	return nil
 }
 
-// 生成 User-Agent
-func (d *GuangYa) getUserAgent() string {
-	return "ANDROID-com.guangshanyun.pan/1.1.0 protocolversion/200 accesstype/ clientid/" + clientId +
-		" clientversion/1.1.0 action_type/ networktype/WIFI sessionid/ deviceid/" + d.DeviceId +
-		" providername/NONE devicesign/div101." + d.DeviceId +
-		"500fb2df465d3545f22ac4f1b962fd3e refresh_token/ sdkversion/2.0.7 datetime/" +
-		strconv.FormatInt(time.Now().UnixMilli(), 10) +
-		" usrno/ appname/android-com.guangshanyun.pan session_origin/ grant_type/ appid/ clientip/" +
-		" devicename/Xiaomi_M2102k1ac osversion/14 platformversion/10 accessmode/ devicemodel/M2102K1AC" +
-		" channel/10003 callApp/com.miui.home"
+// ===================== 设备码扫码授权 (OAuth2 Device Authorization Grant) =====================
+
+// getDeviceCode 获取设备码与二维码链接
+func (d *GuangYa) getDeviceCode() (*DeviceCodeResp, error) {
+	req := base.RestyClient.R()
+	req.SetHeaders(commonHeaders())
+	req.SetHeader("X-Device-Id", d.DeviceId)
+	req.SetHeader("X-Device-Sign", deviceSign(d.DeviceId))
+
+	req.SetBody(map[string]string{
+		"scope":     "user",
+		"client_id": clientId,
+	})
+
+	var resp DeviceCodeResp
+	req.SetResult(&resp)
+
+	r, err := req.Post(accountBaseUrl + "/v1/auth/device/code")
+	if err != nil {
+		return nil, err
+	}
+	if !r.IsSuccess() {
+		return nil, errors.New("获取设备码失败: " + r.Status() + " - " + string(r.Body()))
+	}
+	if resp.DeviceCode == "" || resp.VerificationURIComplete == "" {
+		return nil, errors.New("获取设备码失败: " + string(r.Body()))
+	}
+	return &resp, nil
 }
+
+// pollDeviceCode 轮询设备码授权状态
+func (d *GuangYa) pollDeviceCode(deviceCode string) (*TokenResp, error) {
+	req := base.RestyClient.R()
+	req.SetHeaders(commonHeaders())
+	req.SetHeader("X-Device-Id", d.DeviceId)
+	req.SetHeader("X-Device-Sign", deviceSign(d.DeviceId))
+
+	req.SetBody(map[string]string{
+		"grant_type":  "urn:ietf:params:oauth:grant-type:device_code",
+		"device_code": deviceCode,
+		"client_id":   clientId,
+	})
+
+	var tokenResp TokenResp
+	req.SetResult(&tokenResp)
+
+	r, err := req.Post(accountBaseUrl + "/v1/auth/token")
+	if err != nil {
+		return nil, err
+	}
+	// 无论 HTTP 状态码如何都解析 body (authorization_pending 时返回 4xx)
+	if jsonErr := jsoniter.Unmarshal(r.Body(), &tokenResp); jsonErr != nil {
+		return nil, errors.New("轮询扫码状态失败: " + r.Status() + " - " + string(r.Body()))
+	}
+	return &tokenResp, nil
+}
+
+// loginByQRCode 扫码授权登录 (189pc 模式: 二维码通过错误信息返回, 用户扫码后再次保存触发轮询)
+func (d *GuangYa) loginByQRCode() error {
+	// 二维码不存在或已过期, 重新生成
+	if d.qrParam == nil || time.Now().After(d.qrExpireAt) {
+		deviceCode, err := d.getDeviceCode()
+		if err != nil {
+			d.qrParam = nil
+			return err
+		}
+		d.qrParam = deviceCode
+		expiresIn := deviceCode.ExpiresIn
+		if expiresIn <= 0 {
+			expiresIn = 300
+		}
+		d.qrExpireAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+		return d.genQRCode("请使用光鸭云盘App扫描二维码并确认授权, 然后再次点击保存完成登录")
+	}
+
+	// 轮询扫码状态
+	tokenResp, err := d.pollDeviceCode(d.qrParam.DeviceCode)
+	if err != nil {
+		d.qrParam = nil
+		return err
+	}
+
+	switch {
+	case tokenResp.AccessToken != "":
+		// 授权成功, 保存 token 并持久化
+		d.tokenMu.token = tokenResp.AccessToken
+		d.tokenMu.refreshToken = tokenResp.RefreshToken
+		d.tokenMu.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+		d.Token = tokenResp.AccessToken
+		d.RefreshToken = tokenResp.RefreshToken
+		d.qrParam = nil
+		op.MustSaveDriverStorage(d)
+		return nil
+	case tokenResp.Error == "authorization_pending":
+		// 等待扫码
+		return d.genQRCode("二维码尚未扫描, 请使用光鸭云盘App扫描后再次点击保存")
+	case tokenResp.Error == "slow_down":
+		return d.genQRCode("操作过于频繁, 请稍后再次点击保存")
+	case tokenResp.Error == "expired_token":
+		// 二维码过期, 重新生成
+		d.qrParam = nil
+		return d.loginByQRCode()
+	default:
+		d.qrParam = nil
+		if tokenResp.ErrorDescription != "" {
+			return errors.New("扫码授权失败: " + tokenResp.Error + " - " + tokenResp.ErrorDescription)
+		}
+		return errors.New("扫码授权失败: " + tokenResp.Error)
+	}
+}
+
+// genQRCode 生成二维码错误信息 (复用 OpenList 189pc 驱动模式)
+func (d *GuangYa) genQRCode(stateText string) error {
+	png, err := qrcode.Encode(d.qrParam.VerificationURIComplete, qrcode.Medium, 256)
+	if err != nil {
+		return fmt.Errorf("生成二维码失败: %v, 请手动打开链接: %s", err, d.qrParam.VerificationURIComplete)
+	}
+	qrBase64 := base64.StdEncoding.EncodeToString(png)
+	qrPage := fmt.Sprintf(`<body>
+	state: %s
+	<br><img src="data:image/png;base64,%s"/>
+	<br>Or open this URL: <a href="%s">%s</a>
+</body>`, stateText, qrBase64, d.qrParam.VerificationURIComplete, d.qrParam.VerificationURIComplete)
+	return fmt.Errorf("need scan: \n%s", qrPage)
+}
+
+// ===================== 业务 API (Web 端协议) =====================
 
 // API 请求 (api.guangyapan.com)
 func (d *GuangYa) apiRequest(method, path string, callback base.ReqCallback, out interface{}) error {
@@ -214,22 +354,20 @@ func (d *GuangYa) accountRequestNoRefresh(method, path string, callback base.Req
 	u := accountBaseUrl + path
 	req := base.RestyClient.R()
 
-	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
-
-	// 从 token manager 获取最新的 access_token，而非配置中的旧值
 	d.tokenMu.mu.Lock()
 	currentToken := d.tokenMu.token
 	d.tokenMu.mu.Unlock()
 
-	req.SetHeaders(map[string]string{
-		"X-Device-Id":     d.DeviceId,
-		"User-Agent":      d.getUserAgent(),
-		"Accept-Language": "zh-CN",
-		"Content-Type":    "application/json",
-		"Accept":          "application/json",
-		"Authorization":   "Bearer " + currentToken,
-		"ts":              ts,
-	})
+	headers := commonHeaders()
+	headers["X-Device-Id"] = d.DeviceId
+	headers["X-Device-Sign"] = deviceSign(d.DeviceId)
+	headers["Authorization"] = "Bearer " + currentToken
+	headers["Did"] = d.DeviceId
+	headers["Dt"] = "4"
+	headers["did"] = d.DeviceId
+	headers["dt"] = "4"
+	headers["accessToken"] = currentToken
+	req.SetHeaders(headers)
 
 	var r Resp
 	req.SetResult(&r)
@@ -268,15 +406,14 @@ func (d *GuangYa) accountRequestNoRefresh(method, path string, callback base.Req
 // 获取文件列表
 func (d *GuangYa) getFileList(parentId string, page int) ([]FileInfo, error) {
 	var resp FileListResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/file/get_file_list", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/file/get_file_list", func(req *resty.Request) {
 		req.SetBody(FileListReq{
-			SortType: 1,
-			ResType:  0,
-			OrderBy:  3,
-			PageSize: 50,
-			Page:     page,
-			DirType:  1,
-			ParentId: parentId,
+			ParentId:  parentId,
+			Page:      page,
+			PageSize:  50,
+			OrderBy:   3,
+			SortType:  1,
+			FileTypes: []int{},
 		})
 	}, &resp)
 	if err != nil {
@@ -288,7 +425,7 @@ func (d *GuangYa) getFileList(parentId string, page int) ([]FileInfo, error) {
 // 获取下载链接
 func (d *GuangYa) getDownloadUrl(fileId string) (string, error) {
 	var resp DownloadResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/get_res_download_url", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/get_res_download_url", func(req *resty.Request) {
 		req.SetBody(DownloadReq{
 			RequestId: "",
 			FileId:    fileId,
@@ -303,9 +440,9 @@ func (d *GuangYa) getDownloadUrl(fileId string) (string, error) {
 // 获取资产信息
 func (d *GuangYa) getAssets() (*AssetsResp, error) {
 	var resp AssetsResp
-	err := d.apiRequest(http.MethodPost, "/assets/v1/get_assets", func(req *resty.Request) {
-		req.SetBody(AssetsReq{
-			NeedTrafficData: true,
+	err := d.apiRequest(http.MethodPost, "/nd.bizassets.s/v1/get_assets", func(req *resty.Request) {
+		req.SetBody(map[string]interface{}{
+			"needTrafficData": true,
 		})
 	}, &resp)
 	if err != nil {
@@ -327,7 +464,7 @@ func (d *GuangYa) getUserInfo() (*UserInfo, error) {
 // 新建文件夹
 func (d *GuangYa) createDir(parentId, dirName string) (*CreateDirResp, error) {
 	var resp CreateDirResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/file/create_dir", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/file/create_dir", func(req *resty.Request) {
 		req.SetBody(CreateDirReq{
 			FailIfNameExist: false,
 			ParentId:        parentId,
@@ -342,7 +479,7 @@ func (d *GuangYa) createDir(parentId, dirName string) (*CreateDirResp, error) {
 
 // 重命名文件
 func (d *GuangYa) renameFile(fileId, newName string) error {
-	return d.apiRequest(http.MethodPost, "/userres/v1/file/rename", func(req *resty.Request) {
+	return d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/file/rename", func(req *resty.Request) {
 		req.SetBody(RenameReq{
 			NewName: newName,
 			FileId:  fileId,
@@ -353,7 +490,7 @@ func (d *GuangYa) renameFile(fileId, newName string) error {
 // 移动文件
 func (d *GuangYa) moveFile(fileIds []string, parentId string) (string, error) {
 	var resp MoveFileResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/file/move_file", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/file/move_file", func(req *resty.Request) {
 		req.SetBody(MoveFileReq{
 			FileIds:  fileIds,
 			ParentId: parentId,
@@ -368,7 +505,7 @@ func (d *GuangYa) moveFile(fileIds []string, parentId string) (string, error) {
 // 复制文件
 func (d *GuangYa) copyFile(fileIds []string, parentId string) (string, error) {
 	var resp CopyFileResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/file/copy_file", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/file/copy_file", func(req *resty.Request) {
 		req.SetBody(CopyFileReq{
 			FileIds:  fileIds,
 			ParentId: parentId,
@@ -383,7 +520,7 @@ func (d *GuangYa) copyFile(fileIds []string, parentId string) (string, error) {
 // 删除文件
 func (d *GuangYa) deleteFile(fileIds []string) (string, error) {
 	var resp DeleteFileResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/file/delete_file", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/file/delete_file", func(req *resty.Request) {
 		req.SetBody(DeleteFileReq{
 			FileIds: fileIds,
 		})
@@ -397,7 +534,7 @@ func (d *GuangYa) deleteFile(fileIds []string) (string, error) {
 // 获取任务状态
 func (d *GuangYa) getTaskStatus(taskId string) (*TaskStatusResp, error) {
 	var resp TaskStatusResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/get_task_status", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/get_task_status", func(req *resty.Request) {
 		req.SetBody(TaskStatusReq{
 			TaskId: taskId,
 		})
@@ -433,32 +570,10 @@ func (d *GuangYa) waitForTask(taskId string, timeout time.Duration) error {
 	}
 }
 
-// 解析 JWT Token 获取过期时间
-func parseJWTExp(token string) (time.Time, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}, errors.New("invalid JWT token format")
-	}
-
-	// 解码 payload (第二部分)
-	payload := parts[1]
-	// JWT 使用 base64url 编码，需要补齐 padding
-	switch len(payload) % 4 {
-	case 2:
-		payload += "=="
-	case 3:
-		payload += "="
-	}
-
-	// 这里简化处理，直接返回一个默认的过期时间
-	// 实际应该解析 payload 中的 exp 字段
-	return time.Now().Add(2 * time.Hour), nil
-}
-
 // 获取上传凭证
 func (d *GuangYa) getUploadCredential(fileSize int64, fileName, parentId, gcid string) (*UploadCredentialResp, error) {
 	var resp UploadCredentialResp
-	err := d.apiRequest(http.MethodPost, "/userres/v1/get_res_center_token", func(req *resty.Request) {
+	err := d.apiRequest(http.MethodPost, "/nd.bizuserres.s/v1/get_res_center_token", func(req *resty.Request) {
 		req.SetBody(UploadCredentialReq{
 			Res: UploadCredentialRes{
 				FileSize: fileSize,
@@ -478,7 +593,6 @@ func (d *GuangYa) getUploadCredential(fileSize int64, fileName, parentId, gcid s
 // 计算 Gcid (基于内容的哈希)
 func computeGcid(data []byte) string {
 	// Gcid 是基于文件内容的 SHA1 哈希
-	// 对于大文件，使用分片哈希的方式
 	h := sha1.New()
 	h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))

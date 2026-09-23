@@ -2,19 +2,23 @@ package guangya
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
 type GuangYa struct {
 	model.Storage
 	Addition
-	tokenMu tokenManager // Token 状态管理
+	tokenMu    tokenManager    // Token 状态管理
+	qrParam    *DeviceCodeResp // 设备码扫码授权暂存参数 (依赖 OpenList 更新存储时复用驱动实例)
+	qrExpireAt time.Time       // 设备码有效期
 }
 
 func (d *GuangYa) Config() driver.Config {
@@ -26,29 +30,36 @@ func (d *GuangYa) GetAddition() driver.Additional {
 }
 
 func (d *GuangYa) Init(ctx context.Context) error {
-	// 验证 RefreshToken 和 DeviceId 是否已配置
-	if d.RefreshToken == "" || d.DeviceId == "" {
-		return errs.NewErr(nil, "RefreshToken 和 DeviceId 必须配置")
+	// DeviceId: 留空则本地自动生成并立即持久化,
+	// 确保首次扫码与后续保存使用同一设备身份 (授权后即为独立设备, 与手机App互不干扰)
+	if d.DeviceId == "" {
+		d.DeviceId = generateDeviceId()
+		op.MustSaveDriverStorage(d)
 	}
 
-	// 初始化 Token 状态
-	d.tokenMu.refreshToken = d.RefreshToken
-	if d.Token != "" {
-		d.tokenMu.token = d.Token
-		// 如果提供了 Token，尝试解析过期时间
-		exp, err := parseJWTExp(d.Token)
-		if err == nil {
-			d.tokenMu.expiresAt = exp
-		} else {
-			// 默认 2 小时
-			d.tokenMu.expiresAt = exp
-		}
-	}
-
-	// 如果 Token 为空或即将过期，立即刷新
-	if d.tokenMu.token == "" {
-		if err := d.refreshToken(); err != nil {
+	// 扫码授权模式且尚未拿到 RefreshToken: 走设备码扫码流程
+	if d.LoginType != "manual" && d.RefreshToken == "" {
+		if err := d.loginByQRCode(); err != nil {
 			return err
+		}
+	} else {
+		// 手动模式或已有 RefreshToken
+		if d.RefreshToken == "" {
+			return errors.New("手动模式必须填入 RefreshToken, 或改用扫码授权模式")
+		}
+
+		// 初始化 Token 状态
+		d.tokenMu.refreshToken = d.RefreshToken
+		if d.Token != "" {
+			d.tokenMu.token = d.Token
+			d.tokenMu.expiresAt = time.Now().Add(2 * time.Hour)
+		}
+
+		// 如果 Token 为空或即将过期，立即刷新
+		if d.tokenMu.token == "" {
+			if err := d.refreshToken(); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -101,7 +112,7 @@ func (d *GuangYa) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 	return &model.Link{
 		URL: url,
 		Header: http.Header{
-			"User-Agent": []string{d.getUserAgent()},
+			"User-Agent": []string{webUA},
 		},
 	}, nil
 }
