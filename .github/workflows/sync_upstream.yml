@@ -36,12 +36,12 @@ jobs:
           if ! git merge upstream/main --no-edit --allow-unrelated-histories; then
             echo "::warning::Merge conflicts detected, auto-resolving..."
 
-            # 获取所有冲突文件列表
-            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            # 获取所有冲突文件列表并逐个解决
+            # （while read 形式，避免 shell 差异导致的分词问题，且兼容含空格的路径）
             echo "Conflicting files:"
-            echo "$CONFLICTS"
+            git diff --name-only --diff-filter=U
 
-            for file in $CONFLICTS; do
+            while IFS= read -r file; do
               if [[ "$file" == .github/workflows/* ]]; then
                 # 对 .github/workflows/ 下的冲突文件保留 fork 版本（ours），
                 # 因为 fork 有自定义的 CI 修改（DockerHub 条件跳过、GHCR 命名空间、本同步工作流等）
@@ -68,7 +68,7 @@ jobs:
                 git checkout --theirs "$file"
               fi
               git add "$file"
-            done
+            done < <(git diff --name-only --diff-filter=U)
 
             # 完成合并提交
             git commit --no-edit
