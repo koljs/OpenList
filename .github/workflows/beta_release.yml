@@ -84,6 +84,9 @@ jobs:
     needs:
       - changelog
     strategy:
+      # fork 定制：关闭 fail-fast，避免单一平台失败（如 freebsd 基础包 404，
+      # 上游 bug）连坐取消全部平台，其余产物照常发布
+      fail-fast: false
       matrix:
         include:
           - target: "!(*musl*|*windows-arm64*|*windows7-*|*android*|*freebsd*)" # xgo and loongarch (exclude mips64le)
