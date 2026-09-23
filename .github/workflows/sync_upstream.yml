@@ -31,8 +31,9 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          # 尝试合并，如果冲突则自动解决
-          if ! git merge upstream/main --no-edit; then
+          # --allow-unrelated-histories: fork 的 main 历史上曾是孤儿快照分支，
+          # 与 upstream 无共同祖先，普通 merge 会被 git 拒绝（refusing to merge unrelated histories）
+          if ! git merge upstream/main --no-edit --allow-unrelated-histories; then
             echo "::warning::Merge conflicts detected, auto-resolving..."
 
             # 获取所有冲突文件列表
@@ -40,14 +41,29 @@ jobs:
             echo "Conflicting files:"
             echo "$CONFLICTS"
 
-            # 对 .github/workflows/ 下的冲突文件保留 fork 版本（ours），
-            # 因为 fork 有自定义的 CI 修改（DockerHub 条件跳过、GHCR 命名空间等）
-            # 对其他冲突文件采用上游版本（theirs）
             for file in $CONFLICTS; do
               if [[ "$file" == .github/workflows/* ]]; then
+                # 对 .github/workflows/ 下的冲突文件保留 fork 版本（ours），
+                # 因为 fork 有自定义的 CI 修改（DockerHub 条件跳过、GHCR 命名空间、本同步工作流等）
                 echo "  $file: keeping fork version (ours)"
                 git checkout --ours "$file"
+              elif [[ "$file" == drivers/all.go ]]; then
+                # 驱动注册表：以上游版本为准（保留 guangyapan 等上游驱动），
+                # 但必须补回我们的扫码驱动 guangya 的注册，否则驱动会从列表中消失
+                echo "  $file: using upstream version + re-register guangya"
+                git checkout --theirs "$file"
+                if ! grep -q 'v4/drivers/guangya"' "$file"; then
+                  if grep -q 'v4/drivers/google_photo' "$file"; then
+                    sed -i '\#v4/drivers/google_photo#a\	_ "github.com/OpenListTeam/OpenList/v4/drivers/guangya"' "$file"
+                  elif grep -q 'v4/drivers/halalcloud' "$file"; then
+                    sed -i '\#v4/drivers/halalcloud#i\	_ "github.com/OpenListTeam/OpenList/v4/drivers/guangya"' "$file"
+                  else
+                    echo "::error::Cannot find anchor to re-register guangya in $file"
+                    exit 1
+                  fi
+                fi
               else
+                # 其他文件跟随上游，保持功能与上游一致
                 echo "  $file: using upstream version (theirs)"
                 git checkout --theirs "$file"
               fi
@@ -59,6 +75,22 @@ jobs:
             echo "Conflicts auto-resolved."
           fi
 
+      - name: Verify fork customizations
+        run: |
+          # 硬性校验：扫码驱动文件与注册必须保留，失败则中止且不推送
+          test -f drivers/guangya/driver.go || { echo "::error::drivers/guangya/driver.go lost!"; exit 1; }
+          test -f drivers/guangya/util.go   || { echo "::error::drivers/guangya/util.go lost!"; exit 1; }
+          grep -q 'v4/drivers/guangya"' drivers/all.go || { echo "::error::guangya registration lost in drivers/all.go!"; exit 1; }
+          echo "Fork customizations verified."
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify build
+        run: go build ./...
+
       - name: Push changes
         run: |
           git push origin main
@@ -69,6 +101,7 @@ jobs:
           echo "::warning::Sync upstream failed. Manual resolution may be required."
           echo "Steps to resolve:"
           echo "1. git fetch upstream"
-          echo "2. git merge upstream/main"
-          echo "3. Resolve conflicts"
-          echo "4. git push origin main"
+          echo "2. git merge upstream/main --allow-unrelated-histories"
+          echo "3. Resolve conflicts: keep .github/workflows ours; for drivers/all.go use upstream then re-add guangya import"
+          echo "4. Verify: test -f drivers/guangya/driver.go && grep guangya drivers/all.go && go build ./..."
+          echo "5. git push origin main"
